@@ -116,6 +116,7 @@ A bigger GPU is not always faster. If your model is small, or the GPU spends its
 | Partition | Max time | GPUs per job | Access |
 |---|---|---|---|
 | `gpu` | 8 hours | 1 | All users |
+| `gpu-interactive` | 2 hours | 1 | All users |
 | `multigpu` | 24 hours | 8 | Application and approval required |
 
 This session uses the `gpu` partition only. If your training needs more than 8 hours, see [Section 6.4](#64-fitting-in-8-hours).
@@ -133,7 +134,7 @@ Three pieces have to agree before PyTorch can use a GPU:
 | GPU architecture | The generation of the GPU | The node your job lands on | `torch.cuda.get_device_capability()` |
 
 Two rules:
-
+Choose the gpu partition and a GPU type.
 1. **The driver must support the CUDA version of your PyTorch build.** Drivers on Explorer support CUDA 12.x. A CUDA 12.x build of PyTorch works. A CUDA 13.x build does not.
 2. **The build must include code for your GPU.** `torch.cuda.get_arch_list()` shows which architectures are in the build. A V100 (compute capability 7.0) needs `sm_70` in that list.
 
@@ -232,7 +233,7 @@ pip install torch==2.14.1 torchvision==0.29.1 \
 The login node and CPU nodes have no GPU, so this check has to run in a GPU job:
 
 ```bash
-srun --partition=gpu --gres=gpu:1 --cpus-per-task=2 --mem=8G --time=00:15:00 --pty bash
+srun --partition=gpu --gres=gpu:1 --cpus-per-task=2 --mem=8G --time=15:00 --pty bash
 
 module load miniconda3/25.9.1
 source activate pytorch_env
@@ -339,7 +340,7 @@ conda install -y jupyterlab
 ![Jupyter Notebook Configuration](images/jupyternotebook.png)
 
 1. On OOD, open the JupyterLab app.
-2. Choose the `gpu` partition and a GPU type.
+2. Choose the `gpu-interactive` partition and a GPU type.
 3. Check **Custom Anaconda Environment (provide name only)** and enter `pytorch_env` in **Name of Custom Conda Environment**.
 4. Check the GPU in a notebook cell:
 
@@ -374,7 +375,7 @@ Downloading needs no GPU. Do it once, in a separate CPU job, and point every tra
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
-#SBATCH --time=02:00:00
+#SBATCH --time=2:00:00
 #SBATCH --output=%x-%j.out
 
 DATA_DIR=/scratch/$USER/data
@@ -392,8 +393,8 @@ Why a separate job:
 `train.py` never downloads anything. If the data is not there, it stops right away instead of holding the GPU:
 
 ```
-ERROR: CIFAR-10 not found in /scratch/<user>/data.
-  Download it first, outside the GPU job:
+ERROR: CIFAR-10 dataset not found in /scratch/<user>/data.
+  Please download it first:
   python download_data.py --data-dir /scratch/<user>/data
 ```
 
@@ -414,14 +415,14 @@ The same idea applies to your own data: model weights from Hugging Face, dataset
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=cifar10-resnet18
+#SBATCH --job-name=pytorch-training
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:v100-sxm2:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=00:30:00
+#SBATCH --time=30:00
 #SBATCH --output=%x-%j.out
 
 DATA_DIR=/scratch/$USER/data
@@ -441,7 +442,7 @@ python train.py --data-dir "$DATA_DIR" --epochs 10 "$@"
 | `--gres=gpu:v100-sxm2:1` | One V100-SXM2. Use `--gres=gpu:1` for any type |
 | `--cpus-per-task=4` | CPU cores for the job. `train.py` uses all but one of them to load data |
 | `--mem=16G` | CPU memory (RAM). This is not GPU memory |
-| `--time=00:30:00` | Time limit. Slurm stops the job when it is reached |
+| `--time=30:00` | Time limit. Slurm stops the job when it is reached |
 | `--output=%x-%j.out` | Log file named after the job name and job ID. Output and errors both go here |
 | `module load`, `source activate` | Activate the environment inside the job, not in `.bashrc` |
 | `nvidia-smi` | Records which GPU and driver the job got. Useful when you ask for help |
@@ -461,7 +462,7 @@ Submit and follow the log:
 ```bash
 sbatch train_conda.sh
 squeue -u $USER
-tail -f cifar10-resnet18-<jobid>.out
+tail -f pytorch-training-<jobid>.out
 ```
 
 If your own script shows nothing in the log for a long time, Python may be holding the output in a buffer. Use `python -u` or `print(..., flush=True)`.
