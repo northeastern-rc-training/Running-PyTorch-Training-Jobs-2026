@@ -107,7 +107,7 @@ Moving up to an A100 or H200 makes sense if any of these apply:
 - you need BF16 (many recent models are trained and released in BF16)
 - your training won't finish within 8 hours on a V100
 
-A bigger GPU doesn't always mean faster training. With a small model, or with a GPU that spends half its time waiting for data, an H200 won't help you much. Check how busy your GPU actually was with `gpu-logs` ([Section 6.5](#65-after-the-job-check-how-it-went)) before moving up.
+A bigger GPU doesn't always mean faster training. With a small model, or with a GPU that spends half its time waiting for data, an H200 won't help you much. Check how busy your GPU actually was with `gpu-logs` ([Section 6.6](#66-after-the-job-check-how-it-went)) before moving up.
 
 ### 1.4 Partition Limits
 
@@ -117,7 +117,7 @@ A bigger GPU doesn't always mean faster training. With a small model, or with a 
 | `gpu-interactive` | 2 hours | 1 | All users |
 | `multigpu` | 24 hours | 8 | Application and approval required |
 
-We will use `gpu` for the batch jobs in this session and `gpu-interactive` for the OOD examples. If your training needs more than 8 hours, take a look at [Section 6.4](#64-fitting-in-8-hours).
+We will use `gpu` for the batch jobs in this session and `gpu-interactive` for the OOD examples. If your training needs more than 8 hours, take a look at [Section 6.5](#65-fitting-in-8-hours).
 
 ---
 
@@ -217,7 +217,7 @@ pip install torch==2.14.1 torchvision==0.29.1 \
 
 The `--index-url` option lets `pip` look only at PyTorch's CUDA 12.6 package index. If you don't use this flag, you get the default build, which is CUDA 13.x. In this tutorial, package versions are fixed for reproducibility.
 
-> Note: The conda environment takes about 6.5 GB. `conda` keeps a cache of downloaded packages in `~/.conda/pkgs`. You can use `conda clean --all` to clear cached files if your home quota gets tight. Also, `pip cache purge` can be used to clear `pip` cache.
+> Note: The conda environment takes about 6.5 GB. `conda` keeps a cache of downloaded packages in `~/.conda/pkgs`. You can use `conda clean --all` to clear cached files if your home quota gets tight. Also, `pip cache purge` can be used to clear the `pip` cache.
 
 ### 3.2 Check It on a GPU Node
 
@@ -340,7 +340,45 @@ Anything that takes longer than 1 hour should be submitted as a batch job. And w
 
 ## 6. From Notebook to Batch Job
 
-### 6.1 Download Data Before the GPU Job
+### 6.1 From Notebook to Script
+
+Once you have tested your code in Jupyter, the next step is making a script that can run without you watching it. You can export a notebook to a Python script with:
+
+```bash
+jupyter nbconvert --to script my_notebook.ipynb    # creates my_notebook.py
+```
+
+The exported script usually needs some cleanup before it runs as a batch job. Notebook-only lines like `%matplotlib inline` or `!pip install` fail, so remove them. Plots won't show up in a batch job, so replace `plt.show()` with `plt.savefig("loss.png")`.
+
+Beyond that, a few changes make a big difference on a cluster. The sample `train.py` has all of them, so you can use it as a template.
+
+**Stop early if there is no GPU.** As Section 2.1 showed, a wrong PyTorch build makes `torch.cuda.is_available()` return `False` without an error. `train.py` checks this first and exits if no GPU is found:
+
+```python
+if not torch.cuda.is_available():
+    raise SystemExit("ERROR: PyTorch cannot use a GPU. ...")
+```
+
+**Take paths and settings as arguments.** Hard-coded paths break if you move the data or run from another directory. With `argparse`, the same script works for a quick test and for a full run:
+
+```python
+p.add_argument("--data-dir", default="./data")
+p.add_argument("--epochs", type=int, default=10)
+```
+
+That is also why the sample batch scripts end with `"$@"`. Running `sbatch train_conda.sh --epochs 3` passes `--epochs 3` straight to `train.py`.
+
+**Match DataLoader workers to the cores you asked for.** `train.py` counts the number of cores assigned to the job and starts one worker fewer than that (Section 6.4 shows why this matters):
+
+```python
+num_workers = max(1, len(os.sched_getaffinity(0)) - 1)
+```
+
+**Print with `flush=True`.** In a batch job, the output goes to a file, and Python may hold it in a buffer for a long time. Flushing makes the log show progress while the job is running.
+
+**Save checkpoints.** If a run might get close to the time limit, save its state regularly so it can pick up from there when you resubmit it (Section 6.5).
+
+### 6.2 Download Data Before the GPU Job
 
 Downloading a dataset doesn't need a GPU. You can do it in a CPU job and point all your GPU training jobs at that copy.
 
@@ -379,7 +417,7 @@ ERROR: CIFAR-10 dataset not found in /scratch/<user>/data.
 
 This applies to your own data too, whether it is model weights from Hugging Face, a dataset from the web, or files from another server. Get them in a CPU job or on the transfer node (`xfer.discovery.neu.edu`) first.
 
-### 6.2 The Batch Script
+### 6.3 The Batch Script
 
 `train_conda.sh`:
 
@@ -437,7 +475,7 @@ squeue -u $USER
 tail -f pytorch-training-<jobid>.out
 ```
 
-### 6.3 How Many CPUs?
+### 6.4 How Many CPUs?
 
 While the GPU trains on one batch, DataLoader workers on the CPU are getting the next ones ready: reading the images, cropping and flipping them, and turning them into tensors. `train.py` starts one worker per CPU core and leaves one core for the main process.
 
@@ -451,7 +489,7 @@ Here is the same job on a V100-SXM2 with only `--cpus-per-task` changed (average
 
 Things to notice:
 
-- With 1 core, each epoch took about 50% longer, because the GPU kept waiting for the CPU. `gpu-logs` ([Section 6.5](#65-after-the-job-check-how-it-went)) shows the same thing from the GPU's side: 96% GPU Utility with 4 cores and about 57% with 1 core.
+- With 1 core, each epoch took about 50% longer, because the GPU kept waiting for the CPU. `gpu-logs` ([Section 6.6](#66-after-the-job-check-how-it-went)) shows the same thing from the GPU's side: 96% GPU Utility with 4 cores and about 57% with 1 core.
 - Going from 4 to 8 cores made no difference. Once the data shows up fast enough, extra cores don't help.
 - If you leave out `--cpus-per-task`, you get the default number of cores, which can be too few for a GPU job. 4 cores per GPU is a good place to start for jobs like this.
 
@@ -463,9 +501,9 @@ UserWarning: This DataLoader will create 3 worker processes in total. Our sugges
 
 The Optimizing GPU usage session goes further into tuning the data pipeline.
 
-### 6.4 Fitting in 8 Hours
+### 6.5 Fitting in 8 Hours
 
-Before a long run, try 2 or 3 epochs, look at the job's wall-clock time with `seff` ([Section 6.5](#65-after-the-job-check-how-it-went)), and scale it up with some margin. Use the wall-clock time from `seff` as a baseline. The `Total time` that `train.py` prints at the end only covers the training loop, so starting Python, importing packages, and loading the data are not in it.
+Before a long run, try 2 or 3 epochs, look at the job's wall-clock time with `seff` ([Section 6.6](#66-after-the-job-check-how-it-went)), and scale it up with some margin. Use the wall-clock time from `seff` as a baseline. The `Total time` that `train.py` prints at the end only covers the training loop, so starting Python, importing packages, and loading the data are not in it.
 
 When a job hits its time limit, Slurm stops it and the log ends with a line like:
 
@@ -483,7 +521,7 @@ To start from scratch, delete the output directory. If you run several jobs at t
 
 The [Checkpoint Restart on HPC](https://github.com/northeastern-rc-training/Checkpointing-on-HPC) session covers checkpointing in more depth.
 
-### 6.5 After the Job: Check How It Went
+### 6.6 After the Job: Check How It Went
 
 Once a job finishes, two commands will tell you whether you asked for the right resources.
 
@@ -529,10 +567,20 @@ It only samples every few minutes, so a short job may show just one or two lines
 
 A few things to look for:
 
-- If **GPU utilization is low**, the GPU was waiting on something. Check `--cpus-per-task` ([Section 6.3](#63-how-many-cpus)) before requesting a bigger GPU.
-- **Low CPU efficiency** is normal for a GPU job, because the DataLoader workers need some slack to stay ahead of the GPU. In the demo, 4 cores at 50% efficiency beat 1 core at 93%. Only cut cores if the run time doesn't change.
-- If **memory use is far below `--mem`**, ask for less memory next time. The demo used 1.2 GB out of 16 GB.
-- If **GPU memory use is low**, a smaller GPU may be enough. The demo used about 2% of the V100's 32 GB.
+- If **GPU utilization is low**, the GPU was waiting on something. Check `--cpus-per-task` ([Section 6.4](#64-how-many-cpus)) before requesting a bigger GPU.
+- **Low CPU efficiency** is normal for a GPU job, because the DataLoader workers need some slack to stay ahead of the GPU. In the sample job, 4 cores at 50% efficiency beat 1 core at 93%. Only cut cores if the run time doesn't change.
+- If **memory use is far below `--mem`**, ask for less memory next time. The sample job used 1.2 GB out of 16 GB.
+- If **GPU memory use is low**, a smaller GPU may be enough. The sample job used about 2% of the V100's 32 GB.
+
+### 6.7 Putting It Together: Planning a Run
+
+Here is how the pieces fit together for a run of your own. Let's assume that you want to train a model with 300 million parameters using the Adam optimizer.
+
+1. **Pick a GPU:** At 16 bytes per parameter (Section 1.2), the model needs about 5 GB before activations. That leaves plenty of room on a V100 with 32 GB of memory, so you can start there.
+2. **Ask for cores and memory:** Start with 4 cores (Section 6.4) and enough `--mem`. You will adjust both after the first run.
+3. **Do a short test:** Run a few epochs and check the wall-clock time with `seff`. For this example, let's say it comes out to about 5 minutes per epoch.
+4. **Check the time limit:** 100 epochs at 5 minutes each will require more than 8 hours, so the run won't fit in a single job. Since `train.py` saves a checkpoint every epoch, you can resubmit the job and the training will resume.
+5. **Check after the first job:** If `gpu-logs` shows low GPU utilization, check your `--cpus-per-task` first. If utilization is already high and the run is still too slow, a faster GPU like an A100 is worth requesting. `seff` tells you whether to adjust `--mem` next time.
 
 ---
 
@@ -544,7 +592,7 @@ A few things to look for:
 2. **Always check on a GPU node.** You want `torch.version.cuda` to say `12.6` and `torch.cuda.is_available()` to return `True`.
 3. **Conda or container?** Conda is easier when you change packages often, and the shared container is easier when the standard packages are all you need. Performance is the same.
 4. **Download data in a separate CPU job.** A GPU should never sit idle waiting for a download.
-5. **Ask for CPU cores too.** With 1 core, each epoch of the demo took about 50% longer. 4 cores were enough.
+5. **Ask for CPU cores too.** With 1 core, each epoch of the sample job took about 50% longer. 4 cores were enough.
 6. **Start with a V100.** Switch to an A100 or H200 when you need more memory or BF16, or when a V100 job takes too long.
 7. **Plan around the 8-hour limit.** Time a short run first, and checkpoint and resubmit if you need longer.
 
